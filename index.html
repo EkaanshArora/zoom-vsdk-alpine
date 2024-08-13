@@ -1,0 +1,166 @@
+<html>
+
+<head>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://source.zoom.us/videosdk/zoom-video-1.11.0.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="coi-serviceworker.js"></script>
+  <style>
+    video-player-container {
+      width: 100%;
+      height: 100%;
+      display: grid !important;
+      grid-template-columns: repeat(1, minmax(0, 1fr));
+    }
+
+    video-player-container:has(> :nth-child(2)) {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    video-player-container:has(> :nth-child(5)) {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    video-player-container:has(> :nth-child(17)) {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    video-player {
+      width: 100%;
+      height: auto;
+      aspect-ratio: 16/9;
+    }
+  </style>
+</head>
+
+<body x-data>
+  <div class="flex h-full w-full flex-1 flex-col">
+    <div class="flex w-[80vw] overflow-hidden self-center margin-auto" x-show="$store.callStore.inSession">
+      <video-player-container id="videoContainer"></video-player-container>
+    </div>
+    <template x-if="!$store.callStore.inSession">
+      <div class="mx-auto flex w-64 flex-col self-center" x-data="{ topic: '', token: '' }">
+        <input type="text" placeholder="Enter topic" class="w-full p-2 border-2 rounded-md" x-model="topic">
+        <input type="text" placeholder="Enter token" class="w-full p-2 border-2 rounded-md" x-model="token">
+        <button @click="()=>startCall(topic, token)"
+          class="bg-blue-500 text-white font-bold py-2 px-4 rounded mb-4 w-64 self-center">
+          Join
+        </button>
+      </div>
+    </template>
+    <template x-if="$store.callStore.inSession">
+      <div class="flex w-full flex-col justify-around self-center">
+        <div class="flex flex-row self-center m-2">
+          <button @click="toggleVideo" class="bg-blue-500 text-white font-bold py-2 px-4 rounded mx-2 w-64 self-center">
+            <template x-if="!$store.callStore.videoMuted">
+              <p>Unmute Video</p>
+            </template>
+            <template x-if="$store.callStore.videoMuted">
+              <p>Mute Video</p>
+            </template>
+          </button>
+          <button @click="toggleAudio" class="bg-blue-500 text-white font-bold py-2 px-4 rounded mx-2 w-64 self-center">
+            <template x-if="!$store.callStore.audioMuted">
+              <p>Unmute Audio</p>
+            </template>
+            <template x-if="$store.callStore.audioMuted">
+              <p>Mute Audio</p>
+            </template>
+          </button>
+          <button @click="leaveCall" class="bg-blue-500 text-white font-bold py-2 px-4 rounded mx-2 w-64 self-center">
+            <p>Leave</p>
+          </button>
+        </div>
+      </div>
+    </template>
+  </div>
+  <script>
+    const username = `User-${String(new Date().getTime()).slice(6)}`;
+    const ZoomVideo = window.WebVideoSDK.default;
+    const client = ZoomVideo.createClient();
+    const videoContainer = document.getElementById("videoContainer");
+    console.log(videoContainer)
+
+    document.addEventListener('alpine:init', async () => {
+      console.log('alpine initialized')
+      Alpine.store('callStore', {
+        inSession: false,
+        audioMuted: false,
+        videoMuted: false,
+        setInSession(value) {
+          this.inSession = value
+        },
+        setAudioMuted(value) {
+          this.audioMuted = !this.audioMuted;
+        },
+        setVideoMuted(value) {
+          this.videoMuted = !this.videoMuted;
+        }
+      })
+      await client.init("en-US", "Global", { patchJsMedia: true });
+    })
+
+    const startCall = async (topic, token) => {
+      console.log(topic, token)
+      if (!topic || !token) {
+        console.error('Topic or token is empty')
+        return;
+      }
+      client.on("peer-video-state-change", renderVideo);
+      await client.join(topic, token, username);
+      const mediaStream = client.getMediaStream();
+      await mediaStream.startAudio();
+      await mediaStream.startVideo();
+      await renderVideo({ action: 'Start', userId: client.getCurrentUserInfo().userId });
+      Alpine.store('callStore').setInSession(true);
+      Alpine.store('callStore').setAudioMuted(mediaStream.isAudioMuted());
+      Alpine.store('callStore').setVideoMuted(!mediaStream.isCapturingVideo());
+    };
+
+    const renderVideo = async (event) => {
+      const mediaStream = client.getMediaStream();
+      if (event.action === 'Stop') {
+        const element = await mediaStream.detachVideo(event.userId);
+        Array.isArray(element) ? element.forEach((el) => el.remove()) : element.remove();
+      } else {
+        const userVideo = await mediaStream.attachVideo(event.userId, 2);
+        videoContainer.appendChild(userVideo);
+      }
+    };
+
+    const leaveCall = async () => {
+      const mediaStream = client.getMediaStream();
+      for (const user of client.getAllUser()) {
+        const element = await mediaStream.detachVideo(user.userId);
+        Array.isArray(element) ? element.forEach((el) => el.remove()) : element.remove();
+      }
+      client.off("peer-video-state-change", renderVideo);
+      await client.leave();
+      Alpine.store('callStore').setInSession(false);
+    }
+
+    const toggleVideo = async () => {
+      const mediaStream = client.getMediaStream();
+      if (mediaStream.isCapturingVideo()) {
+        await mediaStream.stopVideo();
+        await renderVideo({ action: 'Stop', userId: client.getCurrentUserInfo().userId });
+      } else {
+        await mediaStream.startVideo();
+        await renderVideo({ action: 'Start', userId: client.getCurrentUserInfo().userId });
+      }
+      Alpine.store('callStore').setVideoMuted(!mediaStream.isCapturingVideo());
+    };
+
+    const toggleAudio = async () => {
+      const mediaStream = client.getMediaStream();
+      if (client.getCurrentUserInfo().muted) {
+        await mediaStream.unmuteAudio();
+      } else {
+        await mediaStream.muteAudio();
+      }
+      Alpine.store('callStore').setAudioMuted(mediaStream.isAudioMuted());
+    };
+  </script>
+</body>
+
+</html>
